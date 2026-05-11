@@ -116,6 +116,25 @@ const volcengineCodingPlanChatModels: AIChatModelCard[] = [
       functionCall: true,
       reasoning: true,
     },
+    contextWindowTokens: 204_800,
+    description:
+      'MiniMax-M2.7 is a reasoning-capable model from MiniMax that supports interleaved thinking and tool use for complex coding and agent workflows.',
+    displayName: 'MiniMax-M2.7',
+    enabled: true,
+    id: 'minimax-m2.7',
+    maxOutput: 128_000,
+    organization: 'MiniMax',
+    releasedAt: '2026-03-18',
+    settings: {
+      extendParams: ['enableReasoning'],
+    },
+    type: 'chat',
+  },
+  {
+    abilities: {
+      functionCall: true,
+      reasoning: true,
+    },
     contextWindowTokens: 200_000,
     description:
       "GLM-4.7 is Zhipu's latest flagship model, enhanced for Agentic Coding scenarios with improved coding capabilities, long-term task planning, and tool collaboration.",

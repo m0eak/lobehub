@@ -119,6 +119,14 @@ export interface MessageMapContext {
  * ```
  */
 export interface ConversationContext {
+  /**
+   * Agent document row id (`agent_documents.id`) that the user is currently
+   * viewing. When set, callers can skip the `listDocumentsForTopic` reverse
+   * lookup in `ActiveTopicDocumentContextInjector` and the `<document>` block
+   * is guaranteed to carry `agent_document_id` for downstream tool calls
+   * (`readDocument`, `modifyNodes`).
+   */
+  agentDocumentId?: string;
   agentId: string;
   /**
    * Optional default assignee candidate for task manager conversations.
@@ -131,6 +139,17 @@ export interface ConversationContext {
    * other agent resources tied to the same topic.
    */
   documentId?: string;
+  /**
+   * Group being configured by the Group Agent Builder panel (`group_agent_builder`
+   * scope).
+   *
+   * Deliberately separate from {@link groupId}: that field marks the run as a
+   * group *chat* turn and gets stamped onto the created topic and messages,
+   * which would drag the builder's side-conversation into the group's own
+   * message read path. This one only scopes the builder's own buckets and topic
+   * list, and travels to the server as `ExecAgentAppContext.editingGroupId`.
+   */
+  editingGroupId?: string;
   /**
    * Group ID for group conversations
    * Used when scope is 'group' or 'group_agent'
@@ -149,12 +168,23 @@ export interface ConversationContext {
    */
   isolatedTopic?: boolean;
   /**
+   * Whether this conversation is an isolated sub-agent execution spawned by
+   * another agent. Used to disable recursive sub-agent dispatch.
+   */
+  isSubAgent?: boolean;
+  /**
    * Whether the current agent is the Supervisor in group orchestration
    * - Used to mark assistant messages with metadata.isSupervisor
    * - conversation-flow will transform role to 'supervisor' for UI rendering
    * - context-engine will restore role back to 'assistant' for model
    */
   isSupervisor?: boolean;
+  /**
+   * Orchestration role of the current agent within a group conversation.
+   * Canonical replacement for {@link isSupervisor} — stamped onto the assistant
+   * message's `metadata.orchestrationRole` so the role snapshot persists.
+   */
+  orchestrationRole?: 'supervisor' | 'member';
   /**
    * Scope type for the conversation
    * - 'main': Agent main conversation (default)
@@ -214,4 +244,11 @@ export interface ConversationContext {
    * builds `RuntimeInitialContext.taskManager` from the task store.
    */
   viewedTask?: { type: 'list' } | { taskId: string; type: 'detail' };
+  /**
+   * Workspace slug captured at the conversation entry point. Desktop
+   * notifications and other out-of-band navigations use this to return to the
+   * same workspace instead of reinterpreting the target under the currently
+   * active tab.
+   */
+  workspaceSlug?: string;
 }

@@ -1,5 +1,4 @@
 import { UserInteractionIdentifier } from '@lobechat/builtin-tool-user-interaction';
-import { AgentMarketplaceIdentifier } from '@lobechat/builtin-tool-web-onboarding/agentMarketplace';
 import { DEFAULT_ONBOARDING_MODEL, DEFAULT_ONBOARDING_PROVIDER } from '@lobechat/business-const';
 
 import type { BuiltinAgentDefinition } from '../../types';
@@ -16,25 +15,17 @@ export const WEB_ONBOARDING: BuiltinAgentDefinition = {
     provider: DEFAULT_ONBOARDING_PROVIDER,
   },
   runtime: (ctx) => ({
+    agencyConfig: {
+      executionTarget: 'none',
+    },
     chatConfig: {
       memory: {
         enabled: false,
       },
-      runtimeEnv: {
-        runtimeMode: {
-          desktop: 'none',
-          web: 'none',
-        },
-      },
       searchMode: 'off',
       skillActivateMode: 'manual',
     },
-    plugins: [
-      WebOnboardingIdentifier,
-      UserInteractionIdentifier,
-      AgentMarketplaceIdentifier,
-      ...(ctx.plugins || []),
-    ],
+    plugins: [WebOnboardingIdentifier, UserInteractionIdentifier, ...(ctx.plugins || [])],
     systemRole: createSystemRole(ctx.userLocale, { isDev: ctx.isDev }),
   }),
   slug: BUILTIN_AGENT_SLUGS.webOnboarding,

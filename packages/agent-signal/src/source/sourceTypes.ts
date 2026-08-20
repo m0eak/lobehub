@@ -6,7 +6,7 @@ export const AGENT_SIGNAL_SOURCE_TYPES = {
   agentExecutionCompleted: 'agent.execution.completed',
   agentExecutionFailed: 'agent.execution.failed',
   agentNightlyReviewRequested: 'agent.nightly_review.requested',
-  agentSelfIterationIntentDeclared: 'agent.self_iteration_intent.declared',
+  agentSelfFeedbackIntentDeclared: 'agent.self_feedback_intent.declared',
   agentSelfReflectionRequested: 'agent.self_reflection.requested',
   agentUserMessage: 'agent.user.message',
   botMessageMerged: 'bot.message.merged',
@@ -31,10 +31,32 @@ export type AgentSignalSourceType = ValueOf<typeof AGENT_SIGNAL_SOURCE_TYPES>;
 export interface AgentSignalSourcePayloadMap {
   [AGENT_SIGNAL_SOURCE_TYPES.agentExecutionCompleted]: {
     agentId?: string;
+    /**
+     * Message the deferred skill synthesis should anchor to — the assistant turn
+     * that completed this run. Lets completion-stage skill synthesis seed under
+     * the assistant group instead of as a floating `parent_id=null` mainline root.
+     */
+    anchorMessageId?: string;
+    /** Assistant message id for the completed turn; used to hydrate the trajectory. */
+    assistantMessageId?: string;
     operationId: string;
+    /**
+     * Completion reason as classified by the producer. Non-terminal pauses
+     * (`waiting_for_async_tool` / `waiting_for_human`) reuse this same source, so
+     * completion-stage consumers that need a finished turn must filter on it.
+     */
+    reason?: string;
+    /**
+     * Opaque completion side-effect payload attached by the executor for
+     * builtin background agents (e.g. self-iteration tool outcomes used for
+     * receipt projection). Carried as-is; the producing layer owns its shape.
+     */
+    selfIteration?: unknown;
     serializedContext?: string;
     steps: number;
     topicId?: string;
+    /** User message that initiated this turn, when known by the producer. */
+    triggerMessageId?: string;
     turnCount?: number;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.agentExecutionFailed]: {
@@ -55,7 +77,7 @@ export interface AgentSignalSourcePayloadMap {
     timezone: string;
     userId: string;
   };
-  [AGENT_SIGNAL_SOURCE_TYPES.agentSelfIterationIntentDeclared]: {
+  [AGENT_SIGNAL_SOURCE_TYPES.agentSelfFeedbackIntentDeclared]: {
     action: 'write' | 'create' | 'refine' | 'consolidate' | 'proposal';
     agentId: string;
     confidence: number;
@@ -84,15 +106,20 @@ export interface AgentSignalSourcePayloadMap {
   };
   [AGENT_SIGNAL_SOURCE_TYPES.agentUserMessage]: {
     agentId?: string;
+    /** Message the receipt or UI should attach to, usually the assistant response. */
+    anchorMessageId?: string;
     documentPayload?: Record<string, unknown>;
     intents?: Array<'document' | 'memory' | 'persona' | 'prompt' | 'skill'>;
     memoryPayload?: Record<string, unknown>;
     message: string;
+    /** Legacy source message identifier kept for compatibility. */
     messageId: string;
     serializedContext?: string;
     threadId?: string;
     topicId?: string;
     trigger?: string;
+    /** Message that initiated the source or run, usually the user message. */
+    triggerMessageId?: string;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.botMessageMerged]: {
     agentId?: string;
@@ -105,52 +132,81 @@ export interface AgentSignalSourcePayloadMap {
   };
   [AGENT_SIGNAL_SOURCE_TYPES.clientGatewayError]: {
     agentId?: string;
+    /** Message the receipt or UI should attach to, usually the assistant response. */
+    anchorMessageId?: string;
+    /** Legacy assistant response identifier kept for compatibility. */
     assistantMessageId?: string;
     errorMessage?: string;
     operationId: string;
     serializedContext?: string;
     topicId?: string;
+    /** Message that initiated the source or run, usually the user message. */
+    triggerMessageId?: string;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.clientGatewayRuntimeEnd]: {
     agentId?: string;
+    /** Message the receipt or UI should attach to, usually the assistant response. */
+    anchorMessageId?: string;
+    /** Legacy assistant response identifier kept for compatibility. */
     assistantMessageId?: string;
     operationId: string;
     serializedContext?: string;
     topicId?: string;
+    /** Message that initiated the source or run, usually the user message. */
+    triggerMessageId?: string;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.clientGatewayStepComplete]: {
     agentId?: string;
+    /** Message the receipt or UI should attach to, usually the assistant response. */
+    anchorMessageId?: string;
+    /** Legacy assistant response identifier kept for compatibility. */
     assistantMessageId?: string;
     operationId: string;
     serializedContext?: string;
     stepIndex: number;
     topicId?: string;
+    /** Message that initiated the source or run, usually the user message. */
+    triggerMessageId?: string;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.clientGatewayStreamStart]: {
     agentId?: string;
+    /** Message the receipt or UI should attach to, usually the assistant response. */
+    anchorMessageId?: string;
+    /** Legacy assistant response identifier kept for compatibility. */
     assistantMessageId?: string;
     operationId: string;
     serializedContext?: string;
     stepIndex: number;
     topicId?: string;
+    /** Message that initiated the source or run, usually the user message. */
+    triggerMessageId?: string;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.clientRuntimeComplete]: {
     agentId?: string;
+    /** Message the receipt or UI should attach to, usually the assistant response. */
+    anchorMessageId?: string;
+    /** Legacy assistant response identifier kept for compatibility. */
     assistantMessageId?: string;
     operationId: string;
     serializedContext?: string;
     status?: 'cancelled' | 'completed' | 'failed';
     threadId?: string;
     topicId?: string;
+    /** Message that initiated the source or run, usually the user message. */
+    triggerMessageId?: string;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.clientRuntimeStart]: {
     agentId?: string;
+    /** Message the receipt or UI should attach to, usually the assistant response. */
+    anchorMessageId?: string;
     operationId: string;
     parentMessageId?: string;
     parentMessageType?: string;
     serializedContext?: string;
     threadId?: string;
     topicId?: string;
+    /** Message that initiated the source or run, usually the user message. */
+    triggerMessageId?: string;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.runtimeAfterStep]: {
     agentId?: string;
@@ -235,9 +291,9 @@ export type SourceAgentNightlyReviewRequested =
 export type SourceAgentSelfReflectionRequested =
   AgentSignalSourceVariant<'agent.self_reflection.requested'>;
 
-/** Agent-declared self-iteration intent source variant. */
-export type SourceAgentSelfIterationIntentDeclared =
-  AgentSignalSourceVariant<'agent.self_iteration_intent.declared'>;
+/** Agent-declared self-feedback intent source variant. */
+export type SourceAgentSelfFeedbackIntentDeclared =
+  AgentSignalSourceVariant<'agent.self_feedback_intent.declared'>;
 
 /** Runtime before-step source variant. */
 export type SourceRuntimeBeforeStep = AgentSignalSourceVariant<'runtime.before_step'>;
@@ -288,9 +344,9 @@ export type SourceEventAgentNightlyReviewRequested =
 export type SourceEventAgentSelfReflectionRequested =
   AgentSignalSourceEvent<'agent.self_reflection.requested'>;
 
-/** Normalized agent-declared self-iteration intent source event. */
-export type SourceEventAgentSelfIterationIntentDeclared =
-  AgentSignalSourceEvent<'agent.self_iteration_intent.declared'>;
+/** Normalized agent-declared self-feedback intent source event. */
+export type SourceEventAgentSelfFeedbackIntentDeclared =
+  AgentSignalSourceEvent<'agent.self_feedback_intent.declared'>;
 
 /** Normalized tool outcome source event. */
 export type SourceEventToolOutcome =
@@ -415,21 +471,21 @@ export const isSelfReflectionSource = (
 };
 
 /**
- * Narrows a source event to `agent.self_iteration_intent.declared`.
+ * Narrows a source event to `agent.self_feedback_intent.declared`.
  *
  * Use when:
- * - Workflow policy composition needs self-iteration intent dependencies only for declared intents
+ * - Workflow policy composition needs self-feedback intent dependencies only for declared intents
  *
  * Expects:
  * - `source.sourceType` follows the AgentSignal source catalog
  *
  * Returns:
- * - Whether the source is an agent-declared self-iteration intent source
+ * - Whether the source is an agent-declared self-feedback intent source
  */
-export const isSelfIterationIntentSource = (
+export const isSelfFeedbackIntentSource = (
   source: AgentSignalSourceEvent,
-): source is SourceEventAgentSelfIterationIntentDeclared => {
-  return source.sourceType === AGENT_SIGNAL_SOURCE_TYPES.agentSelfIterationIntentDeclared;
+): source is SourceEventAgentSelfFeedbackIntentDeclared => {
+  return source.sourceType === AGENT_SIGNAL_SOURCE_TYPES.agentSelfFeedbackIntentDeclared;
 };
 
 /**

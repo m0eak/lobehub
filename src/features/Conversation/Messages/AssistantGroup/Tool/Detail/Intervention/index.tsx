@@ -1,10 +1,10 @@
 import { getBuiltinIntervention } from '@lobechat/builtin-tools/interventions';
 import { safeParseJSON } from '@lobechat/utils';
 import { Flexbox } from '@lobehub/ui';
-import { memo, Suspense, useCallback, useMemo, useRef, useState } from 'react';
+import { memo, Suspense, useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-import { useChatStore } from '@/store/chat';
+import { useSingleton } from '@/hooks/useSingleton';
 import { useUserStore } from '@/store/user';
 import { toolInterventionSelectors } from '@/store/user/selectors';
 
@@ -39,27 +39,24 @@ const Intervention = memo<InterventionProps>(
     const [isEditing, setIsEditing] = useState(false);
     const updatePluginArguments = useConversationStore((s) => s.updatePluginArguments);
 
-    // Store beforeApprove callbacks from intervention components (support multiple registrations)
-    // Use Map with id as key for reliable cleanup
-    const beforeApproveCallbacksRef = useRef<Map<string, () => void | Promise<void>>>(new Map());
-
-    // Register a callback to be called before approval
-    const registerBeforeApprove = useCallback(
-      (callbackId: string, callback: () => void | Promise<void>) => {
-        beforeApproveCallbacksRef.current.set(callbackId, callback);
-        // Return cleanup function to unregister
-        return () => {
-          beforeApproveCallbacksRef.current.delete(callbackId);
-        };
-      },
-      [],
+    const beforeApproveCallbacks = useSingleton(
+      () => new Map<string, () => void | Promise<void>>(),
     );
 
-    // Handler to be called before approve action - calls all registered callbacks
+    const registerBeforeApprove = useCallback(
+      (callbackId: string, callback: () => void | Promise<void>) => {
+        beforeApproveCallbacks.set(callbackId, callback);
+        return () => {
+          beforeApproveCallbacks.delete(callbackId);
+        };
+      },
+      [beforeApproveCallbacks],
+    );
+
     const handleBeforeApprove = useCallback(async () => {
-      const callbacks = Array.from(beforeApproveCallbacksRef.current.values());
+      const callbacks = Array.from(beforeApproveCallbacks.values());
       await Promise.all(callbacks.map((cb) => cb()));
-    }, []);
+    }, [beforeApproveCallbacks]);
 
     const handleCancel = useCallback(() => {
       setIsEditing(false);
@@ -94,7 +91,7 @@ const Intervention = memo<InterventionProps>(
 
     const parsedArgs = useMemo(() => safeParseJSON(requestArgs || '') ?? {}, [requestArgs]);
 
-    const isCustomInteraction = isCustomInteractionIdentifier(identifier);
+    const isCustomInteraction = isCustomInteractionIdentifier(identifier, apiName);
 
     const topicId = useConversationStore((s) => dataSelectors.getDbMessageById(id)(s)?.topicId);
     const submitToolInteraction = useConversationStore((s) => s.submitToolInteraction);
@@ -102,9 +99,11 @@ const Intervention = memo<InterventionProps>(
     const cancelToolInteraction = useConversationStore((s) => s.cancelToolInteraction);
     // Hetero (CC / Codex) interventions ship the answer back through IPC to a
     // running CLI subprocess instead of starting a fresh `executeClientAgent`
-    // turn. Pull the chat-store action lazily so non-hetero interactions stay
-    // on the existing path with no behavior change.
-    const submitHeteroIntervention = useChatStore((s) => s.submitHeteroIntervention);
+    // turn. Route through the conversation store so it carries this card's own
+    // `context` (agent/topic) to the chat store — otherwise the optimistic
+    // writes and topic-status flip fall back to the global `activeTopicId` and
+    // land on whichever topic the user is currently viewing.
+    const submitHeteroIntervention = useConversationStore((s) => s.submitHeteroIntervention);
 
     const handleInteractionAction = useCallback(
       async (
@@ -123,6 +122,7 @@ const Intervention = memo<InterventionProps>(
               identifier,
               action.payload,
               {
+                apiName,
                 requestArgs: parsedArgs,
                 topicId,
               },
@@ -136,6 +136,7 @@ const Intervention = memo<InterventionProps>(
               'skipped',
               action.payload,
               {
+                apiName,
                 requestArgs: parsedArgs,
                 topicId,
               },
@@ -146,6 +147,7 @@ const Intervention = memo<InterventionProps>(
           }
           case 'cancel': {
             await recordCustomInteractionResolution(identifier, 'cancelled', action.payload, {
+              apiName,
               requestArgs: parsedArgs,
               topicId,
             });
@@ -155,6 +157,7 @@ const Intervention = memo<InterventionProps>(
         }
       },
       [
+        apiName,
         cancelToolInteraction,
         id,
         identifier,
@@ -184,6 +187,7 @@ const Intervention = memo<InterventionProps>(
         return (
           <Flexbox gap={12}>
             <BuiltinToolInterventionRender
+              actionsPortalTarget={actionsPortalTarget}
               apiName={apiName}
               args={parsedArgs}
               identifier={identifier}
@@ -212,7 +216,7 @@ const Intervention = memo<InterventionProps>(
       );
 
       return (
-        <Flexbox gap={12}>
+        <Flexbox data-pending-hotkey-scope gap={12}>
           <SecurityBlacklistWarning args={parsedArgs} />
           <BuiltinToolInterventionRender
             apiName={apiName}

@@ -10,12 +10,16 @@ export default defineConfig({
         replacement: path.resolve(__dirname, '../../packages/device-gateway-client/src/index.ts'),
       },
       {
-        find: '@lobechat/local-file-shell',
+        find: /^@lobechat\/local-file-shell$/,
         replacement: path.resolve(__dirname, '../../packages/local-file-shell/src/index.ts'),
       },
       {
         find: '@lobechat/file-loaders',
         replacement: path.resolve(__dirname, '../../packages/file-loaders/src/index.ts'),
+      },
+      {
+        find: '@lobechat/tool-runtime',
+        replacement: path.resolve(__dirname, '../../packages/tool-runtime/src/index.ts'),
       },
     ],
   },

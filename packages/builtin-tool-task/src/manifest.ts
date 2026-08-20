@@ -47,6 +47,10 @@ export const TaskManifest: BuiltinToolManifest = {
         required: ['name', 'instruction'],
         type: 'object',
       },
+      work: {
+        action: 'create',
+        resourceType: 'task',
+      },
     },
     {
       description:
@@ -96,6 +100,10 @@ export const TaskManifest: BuiltinToolManifest = {
         },
         required: ['tasks'],
         type: 'object',
+      },
+      work: {
+        action: 'create',
+        resourceType: 'task',
       },
     },
     {
@@ -207,7 +215,7 @@ export const TaskManifest: BuiltinToolManifest = {
     },
     {
       description:
-        "Edit a task's fields (name, description, instruction, priority), parent, or dependencies (batched). Status changes go through updateTaskStatus.",
+        "Edit a task's fields (name, description, instruction, priority), parent, or dependencies (batched). Status changes go through updateTaskStatus; schedule configuration goes through setTaskSchedule.",
       name: TaskApiName.editTask,
       parameters: {
         properties: {
@@ -256,6 +264,10 @@ export const TaskManifest: BuiltinToolManifest = {
         required: ['identifier'],
         type: 'object',
       },
+      work: {
+        action: 'update',
+        resourceType: 'task',
+      },
     },
     {
       description:
@@ -301,6 +313,101 @@ export const TaskManifest: BuiltinToolManifest = {
     },
     {
       description:
+        'Configure (or clear) the recurring schedule of a task. Use this to turn a task into a periodically running one, switch between cron (`schedule`) and fixed-interval (`heartbeat`) automation, or disable automation entirely. Pass automationMode=null to stop the task from auto-running. For schedule mode, supply schedulePattern (cron) and scheduleTimezone (IANA). For heartbeat mode, supply heartbeatInterval (seconds). maxExecutions caps how many scheduled runs may fire (null = unlimited). Status changes still go through updateTaskStatus; this tool only touches schedule configuration.',
+      name: TaskApiName.setTaskSchedule,
+      parameters: {
+        properties: {
+          automationMode: {
+            description:
+              'Enables periodic execution. "schedule" fires on the cron `schedulePattern`; "heartbeat" ticks every `heartbeatInterval` seconds. Pass null to disable automation entirely.',
+            enum: ['heartbeat', 'schedule', null],
+            type: ['string', 'null'],
+          },
+          heartbeatInterval: {
+            description:
+              'Periodic execution interval in seconds (heartbeat mode). Pass 0 to clear the interval. Minimum 600s (10 minutes); the server rejects positive values below 600.',
+            type: 'number',
+          },
+          identifier: {
+            description: 'The identifier of the task to configure (e.g. "TASK-1").',
+            type: 'string',
+          },
+          maxExecutions: {
+            description:
+              'Cap on the number of scheduled executions for this task. Pass null to remove the cap (run indefinitely).',
+            type: ['number', 'null'],
+          },
+          schedulePattern: {
+            description:
+              'Cron expression for scheduled mode, e.g. "0 9 * * *" (every day at 09:00). Pass null to clear the pattern.',
+            type: ['string', 'null'],
+          },
+          scheduleTimezone: {
+            description:
+              'IANA timezone for the cron expression, e.g. "Asia/Shanghai" or "America/New_York". Pass null to clear; defaults to UTC when unset.',
+            type: ['string', 'null'],
+          },
+        },
+        required: ['identifier'],
+        type: 'object',
+      },
+      work: {
+        action: 'update',
+        resourceType: 'task',
+      },
+    },
+    {
+      description:
+        'Configure (or clear) a task\'s delivery-acceptance (verify) gate — the evidence-driven check that runs when the task\'s topic completes, so the assigned agent\'s "done" is verified by a separate reviewer instead of blindly trusted. STRONGLY RECOMMENDED whenever you dispatch an executable task to another agent (assigneeAgentId set): turn the gate on with enabled=true and state a one-sentence `requirement` describing what "done" means; the server synthesizes acceptance criteria from it. Pass verifyRubricId to reuse a saved rubric, or verifyCriteriaIds for explicit criteria. Pass null to any field to clear it; omitted fields are left untouched.',
+      name: TaskApiName.setTaskVerify,
+      parameters: {
+        properties: {
+          enabled: {
+            description:
+              'Whether the verify gate runs when the task completes. Pass true to require verification, false to disable, null to clear.',
+            type: ['boolean', 'null'],
+          },
+          identifier: {
+            description: 'The identifier of the task to configure (e.g. "TASK-1").',
+            type: 'string',
+          },
+          maxIterations: {
+            description:
+              'Cap on verify repair / re-run iterations (1-10). Pass null to clear (uses the default).',
+            type: ['number', 'null'],
+          },
+          requirement: {
+            description:
+              'One-sentence acceptance requirement describing what "done" means for this task (e.g. "All unit tests pass and the new endpoint returns 200"). The server synthesizes acceptance criteria from it when no explicit criteria are given. Pass null to clear.',
+            type: ['string', 'null'],
+          },
+          verifierAgentId: {
+            description:
+              'Agent ID that executes the verify run. Omit to use the built-in verify agent. Pass null to clear an existing value.',
+            type: ['string', 'null'],
+          },
+          verifyCriteriaIds: {
+            description:
+              'Explicit acceptance criteria ids to check against. Pass null to clear; omit when relying on requirement-synthesized criteria.',
+            items: { type: 'string' },
+            type: ['array', 'null'],
+          },
+          verifyRubricId: {
+            description:
+              'Reuse a saved rubric template by id instead of ad-hoc criteria. Pass null to clear.',
+            type: ['string', 'null'],
+          },
+        },
+        required: ['identifier'],
+        type: 'object',
+      },
+      work: {
+        action: 'update',
+        resourceType: 'task',
+      },
+    },
+    {
+      description:
         "Update a task's status. Use to mark tasks as completed, canceled, paused, resumed, or failed. To START a task (transition into running), use runTask — it actually launches the agent. updateTaskStatus only flips the status flag without execution. If identifier is omitted, this only works when there is a current task context.",
       name: TaskApiName.updateTaskStatus,
       parameters: {
@@ -339,6 +446,10 @@ export const TaskManifest: BuiltinToolManifest = {
         required: ['identifier'],
         type: 'object',
       },
+      work: {
+        action: 'delete',
+        resourceType: 'task',
+      },
     },
   ],
   identifier: TaskIdentifier,
@@ -348,5 +459,6 @@ export const TaskManifest: BuiltinToolManifest = {
     title: 'Task Tools',
   },
   systemRole: systemPrompt,
+
   type: 'builtin',
 };

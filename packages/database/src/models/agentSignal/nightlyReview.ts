@@ -1,10 +1,10 @@
+import { INBOX_SESSION_ID } from '@lobechat/const';
 import {
   and,
   asc,
   count,
   countDistinct,
   eq,
-  gt,
   gte,
   inArray,
   isNull,
@@ -12,9 +12,14 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 
 import { agents, messagePlugins, messages, topics, users, userSettings } from '../../schemas';
 import type { LobeChatDatabase } from '../../type';
+import { normalizeInboxAgentTitle } from '../../utils/inboxAgent';
+
+/** Restores the cursor timestamp inside PostgreSQL so workflow JSON never truncates its precision. */
+const cursorUsers = alias(users, 'nightly_review_cursor_users');
 
 /**
  * Normalizes database aggregate timestamps.
@@ -30,9 +35,9 @@ const parseAggregateTimestamp = (value: Date | string) =>
 
 /** Cursor for stable user pagination in AgentSignal nightly review scheduling. */
 export interface ListAgentSignalNightlyReviewUsersCursor {
-  /** User creation time used as the primary cursor key. */
+  /** User creation time retained in the serialized checkpoint for observability. */
   createdAt: Date;
-  /** User id used as the tie-break cursor key. */
+  /** User id used to restore the exact database cursor tuple. */
   id: string;
 }
 
@@ -96,7 +101,7 @@ export interface AgentSignalNightlyReviewTarget {
  * - Nightly review needs active agent targets for a local-day window
  *
  * Expects:
- * - User-level AgentSignal lab preference is stored on `users.preference.lab`
+ * - Global feature gates are checked by the service layer
  * - Agent-level opt-in is stored on `agents.chatConfig.selfIteration.enabled`
  *
  * Returns:
@@ -110,7 +115,7 @@ export class AgentSignalNightlyReviewModel {
   }
 
   /**
-   * Lists users who opted into AgentSignal self-iteration and have a timezone.
+   * Lists candidate users with a timezone for nightly review scheduling.
    *
    * Use when:
    * - The nightly scheduler needs a stable cursor over possible users
@@ -124,21 +129,21 @@ export class AgentSignalNightlyReviewModel {
    * - Users sorted by `createdAt, id` for deterministic pagination
    */
   listEligibleUsers = (options: ListAgentSignalNightlyReviewUsersOptions = {}) => {
+    const cursorTuple = options.cursor
+      ? this.db
+          .select({ createdAt: cursorUsers.createdAt, id: cursorUsers.id })
+          .from(cursorUsers)
+          .where(eq(cursorUsers.id, options.cursor.id))
+          .limit(1)
+      : undefined;
     const cursorCondition = options.cursor
-      ? or(
-          gt(users.createdAt, options.cursor.createdAt),
-          and(eq(users.createdAt, options.cursor.createdAt), gt(users.id, options.cursor.id)),
-        )
+      ? sql`(${users.createdAt}, ${users.id}) > (${cursorTuple})`
       : undefined;
 
     const whitelistCondition =
       options.whitelist && options.whitelist.length > 0
         ? inArray(users.id, options.whitelist)
         : undefined;
-
-    const selfIterationEnabledCondition = sql`
-      COALESCE((${users.preference}->'lab'->>'enableAgentSelfIteration')::boolean, false) = true
-    `;
 
     const query = this.db
       .select({
@@ -148,14 +153,14 @@ export class AgentSignalNightlyReviewModel {
       })
       .from(users)
       .leftJoin(userSettings, eq(users.id, userSettings.id))
-      .where(and(cursorCondition, whitelistCondition, selfIterationEnabledCondition))
+      .where(and(cursorCondition, whitelistCondition))
       .orderBy(asc(users.createdAt), asc(users.id));
 
     return options.limit !== undefined ? query.limit(options.limit) : query;
   };
 
   /**
-   * Lists active non-virtual agents for one user's review window.
+   * Lists active agent targets for one user's review window.
    *
    * Use when:
    * - The scheduler must avoid running inactive agents
@@ -164,11 +169,12 @@ export class AgentSignalNightlyReviewModel {
    * Expects:
    * - `windowStart` and `windowEnd` are UTC instants for the user's local review date
    * - Message `agentId` wins when present; topic `agentId` covers legacy messages
+   * - Virtual agents are excluded except the product-owned Lobe AI inbox agent
    *
    * Returns:
-   * - Non-virtual agent targets with message/topic/failure counts
+   * - Agent targets with message/topic/failure counts
    */
-  listActiveAgentTargets = (
+  listActiveAgentTargets = async (
     userId: string,
     options: ListAgentSignalNightlyReviewTargetsOptions,
   ) => {
@@ -185,31 +191,52 @@ export class AgentSignalNightlyReviewModel {
         firstActivityAt: sql<Date>`MIN(${messages.createdAt})`.mapWith(parseAggregateTimestamp),
         lastActivityAt: sql<Date>`MAX(${messages.createdAt})`.mapWith(parseAggregateTimestamp),
         messageCount: count(messages.id),
+        name: agents.name,
+        slug: agents.slug,
         timezone: sql<string>`COALESCE(${userSettings.general}->>'timezone', 'UTC')`,
         title: agents.title,
         topicCount: countDistinct(messages.topicId),
       })
       .from(messages)
-      .leftJoin(topics, and(eq(topics.id, messages.topicId), eq(topics.userId, userId)))
-      .innerJoin(agents, and(eq(agents.id, effectiveAgentId), eq(agents.userId, userId)))
+      .leftJoin(
+        topics,
+        and(eq(topics.id, messages.topicId), eq(topics.userId, userId), isNull(topics.workspaceId)),
+      )
+      .innerJoin(
+        agents,
+        and(eq(agents.id, effectiveAgentId), eq(agents.userId, userId), isNull(agents.workspaceId)),
+      )
       .leftJoin(userSettings, eq(userSettings.id, userId))
       .leftJoin(
         messagePlugins,
-        and(eq(messagePlugins.id, messages.id), eq(messagePlugins.userId, userId)),
+        and(
+          eq(messagePlugins.id, messages.id),
+          eq(messagePlugins.userId, userId),
+          isNull(messagePlugins.workspaceId),
+        ),
       )
       .where(
         and(
           eq(messages.userId, userId),
+          isNull(messages.workspaceId),
           agentFilter,
           gte(messages.createdAt, options.windowStart),
           lte(messages.createdAt, options.windowEnd),
-          or(eq(agents.virtual, false), isNull(agents.virtual)),
-          sql`COALESCE((${agents.chatConfig}->'selfIteration'->>'enabled')::boolean, false) = true`,
+          or(eq(agents.virtual, false), isNull(agents.virtual), eq(agents.slug, INBOX_SESSION_ID)),
+          or(
+            eq(agents.slug, INBOX_SESSION_ID),
+            sql`COALESCE((${agents.chatConfig}->'selfIteration'->>'enabled')::boolean, false) = true`,
+          ),
         ),
       )
-      .groupBy(agents.id, agents.title, userSettings.general)
+      .groupBy(agents.id, agents.title, agents.name, agents.slug, userSettings.general)
       .orderBy(sql`MAX(${messages.createdAt}) DESC`);
 
-    return options.limit !== undefined ? query.limit(options.limit) : query;
+    const rows = await (options.limit !== undefined ? query.limit(options.limit) : query);
+
+    return rows.map(({ slug, ...row }) => ({
+      ...row,
+      title: normalizeInboxAgentTitle(row.title, { slug }),
+    }));
   };
 }

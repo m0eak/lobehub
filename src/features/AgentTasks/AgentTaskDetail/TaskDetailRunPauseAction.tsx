@@ -1,10 +1,11 @@
-import { Button, DropdownMenu, Flexbox, Text } from '@lobehub/ui';
-import { Space } from 'antd';
-import { CalendarOffIcon, ChevronDown, PlayIcon, RotateCcwIcon } from 'lucide-react';
+import { Flexbox, Text } from '@lobehub/ui';
+import { Button, SplitButton } from '@lobehub/ui/base-ui';
+import { CalendarOffIcon, PlayIcon, RotateCcwIcon } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import StopLoadingIcon from '@/components/StopLoading';
+import { usePermission } from '@/hooks/usePermission';
 import { useAgentStore } from '@/store/agent';
 import { builtinAgentSelectors } from '@/store/agent/selectors';
 import { useTaskStore } from '@/store/task';
@@ -14,17 +15,30 @@ import { nextHeartbeatFiring, nextScheduleFiring } from './scheduler/helpers';
 
 const padTime = (n: number) => String(n).padStart(2, '0');
 
-const formatCountdown = (msRemaining: number): string => {
+export type CountdownDisplay =
+  { countdown: string; type: 'time' } | { days: number; hours: number; type: 'days' };
+
+export const formatCountdown = (msRemaining: number): CountdownDisplay => {
   const totalSeconds = Math.max(0, Math.floor(msRemaining / 1000));
+  const days = Math.floor(totalSeconds / 86_400);
+  if (days > 0) {
+    return { days, hours: Math.floor((totalSeconds % 86_400) / 3600), type: 'days' };
+  }
+
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  if (hours > 0) return `${padTime(hours)}:${padTime(minutes)}:${padTime(seconds)}`;
-  return `${padTime(minutes)}:${padTime(seconds)}`;
+  const countdown =
+    hours > 0
+      ? `${padTime(hours)}:${padTime(minutes)}:${padTime(seconds)}`
+      : `${padTime(minutes)}:${padTime(seconds)}`;
+
+  return { countdown, type: 'time' };
 };
 
 const TaskDetailRunPauseAction = memo(() => {
   const { t } = useTranslation('chat');
+  const { allowed: canEditTask, reason } = usePermission('create_content');
   const taskId = useTaskStore(taskDetailSelectors.activeTaskId);
   const canRun = useTaskStore(taskDetailSelectors.canRunActiveTask);
   const canPause = useTaskStore(taskDetailSelectors.canPauseActiveTask);
@@ -47,6 +61,7 @@ const TaskDetailRunPauseAction = memo(() => {
   const [isRunningNow, setIsRunningNow] = useState(false);
 
   const handleRunOrPause = useCallback(async () => {
+    if (!canEditTask) return;
     if (!taskId) return;
     if (canPause) {
       await updateTaskStatus(taskId, 'paused');
@@ -71,9 +86,11 @@ const TaskDetailRunPauseAction = memo(() => {
     runTask,
     updateTask,
     updateTaskStatus,
+    canEditTask,
   ]);
 
   const handleRunNow = useCallback(async () => {
+    if (!canEditTask) return;
     if (!taskId) return;
     setIsRunningNow(true);
     try {
@@ -84,9 +101,10 @@ const TaskDetailRunPauseAction = memo(() => {
     } finally {
       setIsRunningNow(false);
     }
-  }, [taskId, assigneeAgentId, inboxAgentId, runTask, updateTask]);
+  }, [canEditTask, taskId, assigneeAgentId, inboxAgentId, runTask, updateTask]);
 
   const handleCancelSchedule = useCallback(async () => {
+    if (!canEditTask) return;
     if (!taskId) return;
     setIsCancellingSchedule(true);
     try {
@@ -97,7 +115,7 @@ const TaskDetailRunPauseAction = memo(() => {
     } finally {
       setIsCancellingSchedule(false);
     }
-  }, [taskId, setAutomationMode, updateTaskStatus, status]);
+  }, [canEditTask, taskId, setAutomationMode, updateTaskStatus, status]);
 
   const isScheduled = status === 'scheduled';
 
@@ -112,7 +130,10 @@ const TaskDetailRunPauseAction = memo(() => {
     if (!isScheduled) return null;
     let next = null;
     if (automationMode === 'heartbeat') {
-      next = nextHeartbeatFiring(detail?.heartbeat?.lastAt, interval);
+      next = nextHeartbeatFiring(
+        detail?.heartbeat?.scheduledAt ?? detail?.heartbeat?.lastAt,
+        interval,
+      );
     } else if (automationMode === 'schedule' && schedulePattern) {
       next = nextScheduleFiring(schedulePattern, scheduleTimezone);
     }
@@ -122,6 +143,7 @@ const TaskDetailRunPauseAction = memo(() => {
     isScheduled,
     automationMode,
     detail?.heartbeat?.lastAt,
+    detail?.heartbeat?.scheduledAt,
     interval,
     schedulePattern,
     scheduleTimezone,
@@ -131,32 +153,33 @@ const TaskDetailRunPauseAction = memo(() => {
   if (isScheduled) {
     return (
       <Flexbox horizontal align={'center'} gap={12}>
-        <Space.Compact>
-          <Button
-            disabled={isRunningNow}
+        <SplitButton disabled={!canEditTask || isCancellingSchedule} loading={isRunningNow}>
+          <SplitButton.Main
+            disabled={!canEditTask || isRunningNow}
             icon={CalendarOffIcon}
             loading={isCancellingSchedule}
+            title={canEditTask ? undefined : reason}
             onClick={handleCancelSchedule}
           >
             {t('taskDetail.cancelSchedule')}
-          </Button>
-          <DropdownMenu
+          </SplitButton.Main>
+          <SplitButton.Menu
             items={[
               {
-                disabled: isRunningNow || isCancellingSchedule,
+                disabled: !canEditTask || isRunningNow || isCancellingSchedule,
                 icon: PlayIcon,
                 key: 'runNow',
                 label: t('taskDetail.runNow'),
                 onClick: handleRunNow,
               },
             ]}
-          >
-            <Button disabled={isCancellingSchedule} icon={ChevronDown} loading={isRunningNow} />
-          </DropdownMenu>
-        </Space.Compact>
+          />
+        </SplitButton>
         {countdownText && (
           <Text fontSize={12} type={'secondary'}>
-            {t('taskDetail.nextRunCountdown', { countdown: countdownText })}
+            {countdownText.type === 'days'
+              ? t('taskDetail.nextRunCountdownDays', countdownText)
+              : t('taskDetail.nextRunCountdown', countdownText)}
           </Text>
         )}
       </Flexbox>
@@ -176,7 +199,12 @@ const TaskDetailRunPauseAction = memo(() => {
 
   if (canPause) {
     return (
-      <Button icon={StopLoadingIcon} onClick={handleRunOrPause}>
+      <Button
+        disabled={!canEditTask}
+        icon={StopLoadingIcon}
+        title={reason}
+        onClick={handleRunOrPause}
+      >
         {t('taskDetail.stopTask')}
       </Button>
     );
@@ -186,7 +214,13 @@ const TaskDetailRunPauseAction = memo(() => {
   const runIcon = isRerun ? RotateCcwIcon : PlayIcon;
 
   return (
-    <Button icon={runIcon} type={'primary'} onClick={handleRunOrPause}>
+    <Button
+      disabled={!canEditTask}
+      icon={runIcon}
+      title={canEditTask ? undefined : reason}
+      type={'primary'}
+      onClick={handleRunOrPause}
+    >
       {runLabel}
     </Button>
   );

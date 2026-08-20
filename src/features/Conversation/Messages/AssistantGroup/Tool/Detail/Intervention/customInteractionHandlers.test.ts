@@ -1,13 +1,23 @@
-import { AgentMarketplaceIdentifier } from '@lobechat/builtin-tool-web-onboarding/agentMarketplace';
+import { LobeAgentApiName, LobeAgentIdentifier } from '@lobechat/builtin-tool-lobe-agent';
+import {
+  UserInteractionApiName,
+  UserInteractionIdentifier,
+} from '@lobechat/builtin-tool-user-interaction';
+import {
+  WebOnboardingApiName,
+  WebOnboardingIdentifier,
+} from '@lobechat/builtin-tool-web-onboarding';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { installMarketplaceAgents } from '@/services/installMarketplaceAgents';
+
 import {
+  isCustomInteractionIdentifier,
   prepareCustomInteractionSubmit,
   recordCustomInteractionResolution,
 } from './customInteractionHandlers';
-import { installMarketplaceAgents } from './installMarketplaceAgents';
 
-vi.mock('./installMarketplaceAgents', () => ({
+vi.mock('@/services/installMarketplaceAgents', () => ({
   installMarketplaceAgents: vi.fn(),
 }));
 
@@ -40,13 +50,14 @@ describe('customInteractionHandlers', () => {
     });
 
     const result = await prepareCustomInteractionSubmit(
-      AgentMarketplaceIdentifier,
+      WebOnboardingIdentifier,
       {
         categoryHints: ['engineering'],
         requestId: 'req-1',
         selectedTemplateIds: ['template-1', 'template-existing'],
       },
       {
+        apiName: WebOnboardingApiName.showAgentMarketplace,
         topicId: 'topic-1',
         updateTopicMetadata,
       },
@@ -73,12 +84,37 @@ describe('customInteractionHandlers', () => {
     expect(result.options?.createUserMessage).toBe(false);
   });
 
+  it.each([
+    [LobeAgentIdentifier, LobeAgentApiName.askUserQuestion],
+    [UserInteractionIdentifier, UserInteractionApiName.askUserQuestion],
+  ])('persists structured ask-user answers for %s', async (identifier, apiName) => {
+    const payload = {
+      'How broad should this pass be?': 'Focused',
+      'Which surfaces?': ['Chat', 'Settings'],
+    };
+
+    const result = await prepareCustomInteractionSubmit(identifier, payload, { apiName });
+
+    expect(result).toEqual({
+      // createUserMessage must stay false: the completed tool card already
+      // renders the answers, so a synthetic user message would duplicate them
+      // in the client runtime.
+      options: { createUserMessage: false, pluginState: { askUserAnswers: payload } },
+      payload,
+    });
+  });
+
+  it('routes Qoder tools through the heterogeneous custom interaction flow', () => {
+    expect(isCustomInteractionIdentifier('qoder', 'askUserQuestion')).toBe(true);
+  });
+
   it('persists skipped marketplace picks from the original tool arguments', async () => {
     await recordCustomInteractionResolution(
-      AgentMarketplaceIdentifier,
+      WebOnboardingIdentifier,
       'skipped',
       undefined,
       {
+        apiName: WebOnboardingApiName.showAgentMarketplace,
         requestArgs: {
           categoryHints: ['design-creative'],
           requestId: 'req-2',

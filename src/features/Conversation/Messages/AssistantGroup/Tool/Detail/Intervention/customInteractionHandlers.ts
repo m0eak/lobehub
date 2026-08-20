@@ -1,14 +1,21 @@
 import { ClaudeCodeIdentifier } from '@lobechat/builtin-tool-claude-code';
-import { UserInteractionIdentifier } from '@lobechat/builtin-tool-user-interaction';
+import { LobeAgentApiName, LobeAgentIdentifier } from '@lobechat/builtin-tool-lobe-agent';
 import {
-  AgentMarketplaceIdentifier,
-  buildAgentMarketplaceToolResult,
-} from '@lobechat/builtin-tool-web-onboarding/agentMarketplace';
+  UserInteractionApiName,
+  UserInteractionIdentifier,
+} from '@lobechat/builtin-tool-user-interaction';
+import {
+  WebOnboardingApiName,
+  WebOnboardingIdentifier,
+} from '@lobechat/builtin-tool-web-onboarding';
+import { buildAgentMarketplaceToolResult } from '@lobechat/builtin-tool-web-onboarding/agentMarketplace';
 import type { OnboardingAgentMarketplacePickSnapshot } from '@lobechat/types';
+import { pickString } from '@lobechat/utils';
 
+import { installMarketplaceAgents } from '@/services/installMarketplaceAgents';
 import { topicService } from '@/services/topic';
 
-import { installMarketplaceAgents } from './installMarketplaceAgents';
+const QODER_IDENTIFIER = 'qoder';
 
 interface SubmitToolInteractionOptions {
   createUserMessage?: boolean;
@@ -22,6 +29,7 @@ interface CustomInteractionSubmitResult {
 }
 
 interface CustomInteractionContext {
+  apiName?: string;
   requestArgs?: Record<string, unknown>;
   topicId?: string | null;
   updateTopicMetadata?: typeof topicService.updateTopicMetadata;
@@ -32,10 +40,19 @@ type CustomInteractionSubmitHandler = (
   context?: CustomInteractionContext,
 ) => Promise<CustomInteractionSubmitResult | undefined>;
 
+const isAgentMarketplaceCall = (identifier: string, apiName?: string) =>
+  identifier === WebOnboardingIdentifier && apiName === WebOnboardingApiName.showAgentMarketplace;
+
+const isLobeAgentAskUserQuestion = (identifier: string, apiName?: string) =>
+  identifier === LobeAgentIdentifier && apiName === LobeAgentApiName.askUserQuestion;
+
+const isAskUserQuestionCall = (identifier: string, apiName?: string) =>
+  (identifier === UserInteractionIdentifier &&
+    apiName === UserInteractionApiName.askUserQuestion) ||
+  isLobeAgentAskUserQuestion(identifier, apiName);
+
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === 'string');
-
-const pickString = (value: unknown) => (typeof value === 'string' ? value : undefined);
 
 const resolveMarketplacePickBase = (
   payload: Record<string, unknown>,
@@ -114,9 +131,30 @@ const handleAgentMarketplaceSubmit: CustomInteractionSubmitHandler = async (payl
   };
 };
 
-const customInteractionSubmitHandlers = new Map<string, CustomInteractionSubmitHandler>([
-  [AgentMarketplaceIdentifier, handleAgentMarketplaceSubmit],
-]);
+const customInteractionSubmitHandlers: Array<{
+  handler: CustomInteractionSubmitHandler;
+  match: (identifier: string, apiName?: string) => boolean;
+}> = [
+  {
+    // `createUserMessage: false` — the completed tool card already renders the
+    // answers from `pluginState.askUserAnswers`, so the client runtime must
+    // resume from the tool result instead of synthesizing a `role: 'user'`
+    // message (which duplicated the answer as a user bubble). This also aligns
+    // with the Gateway resume path, which never creates a user turn here.
+    handler: async (payload) => ({
+      options: { createUserMessage: false, pluginState: { askUserAnswers: payload } },
+      payload,
+    }),
+    match: isAskUserQuestionCall,
+  },
+  {
+    handler: handleAgentMarketplaceSubmit,
+    match: isAgentMarketplaceCall,
+  },
+];
+
+const findCustomInteractionSubmitHandler = (identifier: string, apiName?: string) =>
+  customInteractionSubmitHandlers.find((entry) => entry.match(identifier, apiName))?.handler;
 
 /**
  * Identifiers whose intervention component renders inline as a form (with
@@ -125,22 +163,32 @@ const customInteractionSubmitHandlers = new Map<string, CustomInteractionSubmitH
  * because the answer ships back through IPC, not through a synthetic user
  * turn.
  */
-const HETERO_CUSTOM_INTERACTION_IDENTIFIERS = new Set<string>([ClaudeCodeIdentifier]);
+const HETERO_CUSTOM_INTERACTION_IDENTIFIERS = new Set<string>([
+  ClaudeCodeIdentifier,
+  QODER_IDENTIFIER,
+]);
 
 export const isHeteroInteractionIdentifier = (identifier: string) =>
   HETERO_CUSTOM_INTERACTION_IDENTIFIERS.has(identifier);
 
-export const isCustomInteractionIdentifier = (identifier: string) =>
+/**
+ * lobe-agent reuses the user-interaction `askUserQuestion` card. Unlike the
+ * standalone tool (whose whole identifier is a custom interaction), lobe-agent
+ * has other APIs (createPlan / clearTodos …) that must keep the default
+ * approve/reject UI — so only its `askUserQuestion` API is a custom interaction.
+ */
+export const isCustomInteractionIdentifier = (identifier: string, apiName?: string) =>
   identifier === UserInteractionIdentifier ||
+  isLobeAgentAskUserQuestion(identifier, apiName) ||
   isHeteroInteractionIdentifier(identifier) ||
-  customInteractionSubmitHandlers.has(identifier);
+  Boolean(findCustomInteractionSubmitHandler(identifier, apiName));
 
 export const prepareCustomInteractionSubmit = async (
   identifier: string,
   payload: Record<string, unknown>,
   context?: CustomInteractionContext,
 ): Promise<CustomInteractionSubmitResult> => {
-  const handler = customInteractionSubmitHandlers.get(identifier);
+  const handler = findCustomInteractionSubmitHandler(identifier, context?.apiName);
   const result = await handler?.(payload, context);
 
   return result ?? { payload };
@@ -153,7 +201,7 @@ export const recordCustomInteractionResolution = async (
   context?: CustomInteractionContext,
   reason?: string,
 ) => {
-  if (identifier !== AgentMarketplaceIdentifier) return;
+  if (!isAgentMarketplaceCall(identifier, context?.apiName)) return;
 
   const pickBase = resolveMarketplacePickBase(payload ?? {}, context?.requestArgs);
   if (!pickBase) return;

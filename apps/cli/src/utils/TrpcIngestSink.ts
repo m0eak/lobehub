@@ -1,3 +1,4 @@
+import type { LocalHeterogeneousAgentType } from '@lobechat/heterogeneous-agents';
 import type { AgentStreamEvent } from '@lobechat/heterogeneous-agents/spawn';
 
 import type { TrpcClient } from '../api/client';
@@ -13,14 +14,16 @@ import type { IngestSink } from './BatchIngester';
 export class TrpcIngestSink implements IngestSink {
   constructor(
     private readonly client: TrpcClient,
-    private readonly agentType: 'claude-code' | 'codex',
+    private readonly agentType: LocalHeterogeneousAgentType,
     private readonly operationId: string,
     private readonly topicId: string,
+    private readonly assistantMessageId?: string,
   ) {}
 
   async finish(params: Parameters<IngestSink['finish']>[0]): Promise<void> {
     await this.client.aiAgent.heteroFinish.mutate({
       agentType: this.agentType,
+      assistantMessageId: this.assistantMessageId,
       operationId: this.operationId,
       topicId: this.topicId,
       ...params,
@@ -30,6 +33,7 @@ export class TrpcIngestSink implements IngestSink {
   async ingest(events: AgentStreamEvent[]): Promise<void> {
     await this.client.aiAgent.heteroIngest.mutate({
       agentType: this.agentType,
+      assistantMessageId: this.assistantMessageId,
       events: events as any,
       operationId: this.operationId,
       topicId: this.topicId,

@@ -1,46 +1,101 @@
-import type { MenuProps } from 'antd';
+import { AGENT_DOCUMENT_CATEGORY } from '@lobechat/const';
+import { Center, Empty, Flexbox, Icon } from '@lobehub/ui';
+import { SkillsIcon } from '@lobehub/ui/icons';
 import { createStaticStyles } from 'antd-style';
-import { Trash2Icon } from 'lucide-react';
+import { FileTextIcon, Maximize2Icon, PenLineIcon, Trash2Icon } from 'lucide-react';
 import type { CSSProperties } from 'react';
 import { memo, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useMatch, useNavigate } from 'react-router-dom';
 import type { KeyedMutator } from 'swr';
 
+import { buildAgentDocumentPath } from '@/features/AgentDocumentPage/navigation';
 import type {
   ExplorerTreeCanDropCtx,
   ExplorerTreeHandle,
   ExplorerTreeNode,
 } from '@/features/ExplorerTree';
-import { ExplorerTree } from '@/features/ExplorerTree';
-import { useChatStore } from '@/store/chat';
+import {
+  DISABLE_ROW_TEXT_SELECTION_CSS,
+  DOCUMENT_TREE_ICON_CSS,
+  DOCUMENT_TREE_LAYOUT,
+  DOCUMENT_TREE_ROW_CSS,
+  ExplorerTree,
+  getExplorerTreeStyleVars,
+  HIDE_POINTER_FOCUS_RING_CSS,
+} from '@/features/ExplorerTree';
+import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
+import type { NativeContextMenuItem } from '@/libs/contextMenu/types';
+import { agentDocumentService } from '@/services/agentDocument';
 
+import { openConvertToSkillModal, slugifySkillName } from './ConvertToSkillModal';
 import DocumentExplorerToolbar from './DocumentExplorerToolbar';
 import { useDocumentTreeOps } from './hooks/useDocumentTreeOps';
 import type { AgentDocumentItem } from './types';
-import {
-  isFolderItem,
-  isManagedSkillItem,
-  isOrphanSkillBundleItem,
-  isSkillIndexItem,
-} from './types';
+import { isOrphanSkillBundleItem } from './types';
+import { usePanelBackground } from './usePanelBackground';
 import { canDropDocument } from './utils/canDrop';
 
-const PAGE_ROUTE_PATTERN = '/agent/:aid/:topicId/page/:docId?';
 const SKILL_INDEX_FILENAME = 'SKILL.md';
+const FILE_TREE_HOST_TAG = 'file-tree-container';
+const RENAME_INPUT_SELECTOR = 'input[data-item-rename-input]';
+// Only used when every ancestor is transparent; the documents page is the
+// common case and paints colorBgLayout.
+const DEFAULT_PANEL_BACKGROUND = '#000';
+
+const DOCUMENT_TREE_UNSAFE_CSS = [
+  DOCUMENT_TREE_ICON_CSS,
+  DOCUMENT_TREE_ROW_CSS,
+  HIDE_POINTER_FOCUS_RING_CSS,
+  DISABLE_ROW_TEXT_SELECTION_CSS,
+].join('\n');
+
+// pierre/trees auto-selects the full value when the rename input mounts. For
+// files with extensions (e.g. `Untitled document.md`), narrow the selection to
+// the stem so the user can type a new name without overwriting the suffix.
+const selectStemOfActiveRenameInput = (root: HTMLElement | null) => {
+  if (!root) return;
+  const host = root.querySelector(FILE_TREE_HOST_TAG);
+  const input = host?.shadowRoot?.querySelector<HTMLInputElement>(RENAME_INPUT_SELECTOR);
+  if (!input) return;
+  const value = input.value;
+  const dotIndex = value.lastIndexOf('.');
+  // Skip dotfiles and extension-less names — leave pierre's full-selection.
+  if (dotIndex <= 0) return;
+  input.setSelectionRange(0, dotIndex);
+};
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
   tree: css`
     --trees-bg-override: transparent;
     --trees-border-color-override: transparent;
     --trees-selected-bg-override: ${cssVar.colorFillSecondary};
+    --trees-selected-fg-override: ${cssVar.colorText};
     --trees-bg-muted-override: ${cssVar.colorFillTertiary};
+
+    /* Every row is a document the user can open, so labels keep the primary
+       text color; only the glyphs step back. Mirrors the sidebar NavItem, which
+       pairs colorText titles with colorTextDescription icons. */
     --trees-fg-override: ${cssVar.colorText};
-    --trees-fg-muted-override: ${cssVar.colorTextSecondary};
+    --trees-fg-muted-override: ${cssVar.colorTextDescription};
     --trees-accent-override: ${cssVar.colorPrimary};
-    --trees-padding-inline-override: 0px;
-    --trees-font-size-override: 12px;
-    --trees-border-radius-override: 6px;
+
+    /* Nesting reads from indentation alone — no indent guides. */
+    --trees-indent-guide-bg-override: transparent;
+
+    /* Documents are prose, not code: give rows the breathing room of a
+       Notion / 语雀 outline instead of the IDE density the Files tree wants.
+       Row height and label size match the sidebar NavItem (36px / 14px). */
+    --trees-font-size-override: ${DOCUMENT_TREE_LAYOUT.fontSize}px;
+    --trees-level-gap-override: ${DOCUMENT_TREE_LAYOUT.levelGap}px;
+    --trees-item-row-gap-override: ${DOCUMENT_TREE_LAYOUT.iconGap}px;
+    --trees-item-padding-x-override: 8px;
+    --trees-item-margin-x-override: 4px;
+    --trees-padding-inline-override: 4px;
+    --trees-border-radius-override: 8px;
+
+    /* Consumed by DOCUMENT_TREE_ICON_CSS inside the shadow root. */
+    --explorer-tree-icon-fg: ${cssVar.colorTextDescription};
+
   `,
 }));
 
@@ -48,28 +103,26 @@ interface Props {
   agentId: string;
   data: AgentDocumentItem[];
   mutate: KeyedMutator<AgentDocumentItem[]>;
+  onOpenDocument?: (documentId: string, agentDocumentId?: string) => void;
   style?: CSSProperties;
 }
 
-const DocumentExplorerTree = memo<Props>(({ agentId, data, mutate, style }) => {
+const DocumentExplorerTree = memo<Props>(({ agentId, data, mutate, onOpenDocument, style }) => {
   const { t } = useTranslation(['chat', 'common']);
-  const navigate = useNavigate();
-  const pageMatch = useMatch(PAGE_ROUTE_PATTERN);
-  const openDocument = useChatStore((s) => s.openDocument);
+  const navigate = useWorkspaceAwareNavigate();
   const treeRef = useRef<ExplorerTreeHandle | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   const startInlineRename = useCallback((id: string) => {
     treeRef.current?.startRenaming(id);
+    // Match the new-file flow: leave the extension out of the selection so
+    // the user can retype only the stem.
+    requestAnimationFrame(() => selectStemOfActiveRenameInput(containerRef.current));
   }, []);
 
-  const ops = useDocumentTreeOps({
-    agentId,
-    data,
-    mutate,
-    topicId: pageMatch?.params.topicId,
-  });
+  const ops = useDocumentTreeOps({ agentId, data, mutate });
 
-  const documents = useMemo(() => data.filter((doc) => doc.sourceType !== 'web'), [data]);
+  const documents = useMemo(() => data.filter((doc) => doc.category !== 'web'), [data]);
 
   // AgentDocument.parentId references the parent's documentId (FK to documents.id),
   // but ExplorerTree's flat layout expects parentId to point at another node's
@@ -88,16 +141,53 @@ const DocumentExplorerTree = memo<Props>(({ agentId, data, mutate, style }) => {
     [rowIdByDocumentId],
   );
 
+  const resolveNodeName = useCallback(
+    (doc: AgentDocumentItem): string => {
+      if (doc.isSkillIndex) return SKILL_INDEX_FILENAME;
+      // Never let an empty name through: a blank segment collides with its
+      // parent's path inside the tree's path store and crashes the whole panel
+      // (see ExplorerTree/adapter/normalize.ts). Fall back to a localized label.
+      return (
+        doc.title ||
+        doc.filename ||
+        t(
+          doc.isFolder
+            ? 'workingPanel.resources.tree.untitledFolder'
+            : 'workingPanel.resources.tree.untitledDocument',
+        )
+      );
+    },
+    [t],
+  );
+
   const nodes = useMemo<ExplorerTreeNode<AgentDocumentItem>[]>(
     () =>
       documents.map((doc) => ({
         data: doc,
         id: doc.id,
-        isFolder: isFolderItem(doc),
-        name: isSkillIndexItem(doc) ? SKILL_INDEX_FILENAME : doc.title || doc.filename || '',
+        isFolder: doc.isFolder,
+        name: resolveNodeName(doc),
         parentId: resolveParentRowId(doc.parentId),
       })),
-    [documents, resolveParentRowId],
+    [documents, resolveNodeName, resolveParentRowId],
+  );
+  // pierre's truncation marker masks the characters it overlays with this color;
+  // it has to be whatever the surrounding panel paints (see usePanelBackground).
+  const panelBackground = usePanelBackground(containerRef, DEFAULT_PANEL_BACKGROUND);
+
+  const treeStyleVars = useMemo(
+    () =>
+      getExplorerTreeStyleVars({
+        iconWidth: DOCUMENT_TREE_LAYOUT.iconWidth,
+        reserveChevronSlot: nodes.some((node) => node.isFolder),
+        rowGap: DOCUMENT_TREE_LAYOUT.iconGap,
+      }),
+    [nodes],
+  );
+
+  const treeStyle = useMemo(
+    () => ({ ...style, ...treeStyleVars, '--explorer-tree-panel-bg': panelBackground }),
+    [panelBackground, style, treeStyleVars],
   );
 
   const parentMap = useMemo(() => {
@@ -111,28 +201,87 @@ const DocumentExplorerTree = memo<Props>(({ agentId, data, mutate, style }) => {
     [documents],
   );
 
+  const focusNewRowForRename = useCallback((pendingId: string) => {
+    // Defer past the current task so React commits the inserted row and the
+    // tree adapter rebuilds its id→path map before we trigger rename.
+    setTimeout(() => {
+      treeRef.current?.startRenaming(pendingId);
+      // After pierre's input.select() runs in its own layout effect, narrow
+      // selection to the stem so the `.md` extension stays intact.
+      requestAnimationFrame(() => selectStemOfActiveRenameInput(containerRef.current));
+    }, 0);
+  }, []);
+
   const handleCreateFolder = useCallback(
-    (parentId: string | null) => ops.createFolder(parentId),
-    [ops],
+    (parentId: string | null) =>
+      ops.createFolder(parentId, { onPendingInserted: focusNewRowForRename }),
+    [focusNewRowForRename, ops],
   );
   const handleCreateDocument = useCallback(
-    (parentId: string | null) => ops.createDocument(parentId),
-    [ops],
+    (parentId: string | null) =>
+      ops.createDocument(parentId, { onPendingInserted: focusNewRowForRename }),
+    [focusNewRowForRename, ops],
+  );
+
+  const handleConvertToSkill = useCallback(
+    (doc: AgentDocumentItem) => {
+      const fallbackTitle = doc.title || doc.filename || '';
+      openConvertToSkillModal({
+        defaultDescription: doc.description ?? '',
+        defaultName: slugifySkillName(fallbackTitle),
+        defaultTitle: fallbackTitle,
+        generateCacheKey: ['document-to-skill-meta', agentId, doc.id],
+        onGenerate: async () => {
+          const meta = await agentDocumentService.generateSkillMeta({
+            agentId,
+            sourceAgentDocumentId: doc.id,
+          });
+          return meta ?? undefined;
+        },
+        onSubmit: async ({ name, description, title, generation }) => {
+          try {
+            await agentDocumentService.convertDocumentToSkill({
+              agentId,
+              description,
+              name,
+              sourceAgentDocumentId: doc.id,
+              title,
+            });
+            // Record implicit feedback: saving the generated values unchanged is
+            // a positive signal, editing them is negative. Best-effort.
+            if (generation) {
+              void agentDocumentService.recordSkillMetaFeedback({
+                data: {
+                  editedFields: generation.editedFields,
+                  final: { description, name, title },
+                  generated: generation.generated,
+                },
+                edited: generation.edited,
+                tracingId: generation.tracingId,
+              });
+            }
+            await mutate();
+            return undefined;
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        },
+      });
+    },
+    [agentId, mutate],
   );
 
   const handleNodeClick = useCallback(
     (node: ExplorerTreeNode<AgentDocumentItem>) => {
       const doc = node.data;
       if (!doc || node.isFolder) return;
-      if (pageMatch?.params.aid && pageMatch.params.topicId) {
-        navigate(
-          `/agent/${pageMatch.params.aid}/${pageMatch.params.topicId}/page/${doc.documentId}`,
-        );
+      if (onOpenDocument) {
+        onOpenDocument(doc.documentId, doc.id);
         return;
       }
-      openDocument(doc.documentId);
+      navigate(buildAgentDocumentPath(agentId, doc.documentId));
     },
-    [navigate, openDocument, pageMatch?.params.aid, pageMatch?.params.topicId],
+    [agentId, navigate, onOpenDocument],
   );
 
   const handleCommitRename = useCallback(
@@ -159,13 +308,13 @@ const DocumentExplorerTree = memo<Props>(({ agentId, data, mutate, style }) => {
 
   const canDrag = useCallback(
     (node: ExplorerTreeNode<AgentDocumentItem>) =>
-      !!node.data && node.data.sourceType !== 'web' && !isManagedSkillItem(node.data),
+      !!node.data && node.data.category === AGENT_DOCUMENT_CATEGORY,
     [],
   );
 
   const canRename = useCallback(
     (node: ExplorerTreeNode<AgentDocumentItem>) =>
-      !!node.data && node.data.sourceType !== 'web' && !isManagedSkillItem(node.data),
+      !!node.data && node.data.category === AGENT_DOCUMENT_CATEGORY,
     [],
   );
 
@@ -175,37 +324,76 @@ const DocumentExplorerTree = memo<Props>(({ agentId, data, mutate, style }) => {
   );
 
   const getContextMenuItems = useCallback(
-    (node: ExplorerTreeNode<AgentDocumentItem>): MenuProps['items'] => {
-      if (node.data && isManagedSkillItem(node.data) && !isRecoverableSkillBundle(node.data)) {
+    (node: ExplorerTreeNode<AgentDocumentItem>): NativeContextMenuItem[] => {
+      const isSkill = node.data?.category === 'skill';
+      if (isSkill && !isRecoverableSkillBundle(node.data!)) {
         return [];
       }
 
       const isFolder = !!node.isFolder;
       const targetParentId = isFolder ? node.id : (node.parentId ?? null);
 
-      const items: NonNullable<MenuProps['items']> = [];
+      // Right-click on a row that's part of the current multi-selection acts
+      // on the whole selection; otherwise it targets only the right-clicked
+      // row (which matches typical file-tree UX where right-clicking outside
+      // the selection narrows the action).
+      const selectedIds = treeRef.current?.getSelectedIds() ?? [];
+      const isMulti = selectedIds.length > 1 && selectedIds.includes(node.id);
+      const deleteIds = isMulti ? selectedIds : [node.id];
 
-      if (isFolder && (!node.data || !isManagedSkillItem(node.data))) {
+      const items: NativeContextMenuItem[] = [];
+
+      if (isFolder && !isSkill && !isMulti) {
         items.push(
           {
             key: 'new-folder',
             label: t('workingPanel.resources.tree.newFolder'),
             onClick: () => handleCreateFolder(targetParentId),
+            sfSymbol: 'folder.badge.plus',
           },
           {
             key: 'new-document',
             label: t('workingPanel.resources.tree.newDocument'),
             onClick: () => handleCreateDocument(targetParentId),
+            sfSymbol: 'doc.badge.plus',
           },
           { key: 'div-1', type: 'divider' },
         );
       }
 
-      if (!node.data || !isManagedSkillItem(node.data)) {
+      if (!isSkill && !isMulti) {
         items.push({
+          icon: <PenLineIcon size={14} />,
           key: 'rename',
           label: t('workingPanel.resources.tree.rename'),
           onClick: () => startInlineRename(node.id),
+          sfSymbol: 'pencil',
+        });
+      }
+
+      // A document file (not a folder, skill, or multi-select) can be expanded
+      // into the full-page document route — the standalone view agent links open.
+      if (!isFolder && !isSkill && !isMulti && node.data?.documentId) {
+        items.push({
+          icon: <Maximize2Icon size={14} />,
+          key: 'open-as-page',
+          label: t('agentDocument.openAsPage'),
+          onClick: () => navigate(buildAgentDocumentPath(agentId, node.data!.documentId)),
+          sfSymbol: 'arrow.up.left.and.arrow.down.right',
+        });
+      }
+
+      // Only plain agent documents (not folders, web sources, or existing
+      // skills) can be migrated into a managed skill.
+      const isConvertibleToSkill =
+        !isFolder && !isSkill && node.data?.category === AGENT_DOCUMENT_CATEGORY;
+      if (isConvertibleToSkill && !isMulti) {
+        items.push({
+          icon: <Icon icon={SkillsIcon} size={14} />,
+          key: 'convert-to-skill',
+          label: t('workingPanel.resources.tree.convertToSkill'),
+          onClick: () => handleConvertToSkill(node.data!),
+          sfSymbol: 'sparkles',
         });
       }
 
@@ -213,36 +401,64 @@ const DocumentExplorerTree = memo<Props>(({ agentId, data, mutate, style }) => {
         danger: true,
         icon: <Trash2Icon size={14} />,
         key: 'delete',
-        label: t('delete', { ns: 'common' }),
-        onClick: () => ops.deleteDocument(node.id),
+        label: isMulti
+          ? t('workingPanel.resources.tree.deleteSelected', { count: deleteIds.length })
+          : t('delete', { ns: 'common' }),
+        onClick: () => ops.deleteDocuments(deleteIds),
+        sfSymbol: 'trash',
       });
 
       return items;
     },
-    [handleCreateDocument, handleCreateFolder, isRecoverableSkillBundle, ops, startInlineRename, t],
+    [
+      agentId,
+      handleConvertToSkill,
+      handleCreateDocument,
+      handleCreateFolder,
+      isRecoverableSkillBundle,
+      navigate,
+      ops,
+      startInlineRename,
+      t,
+    ],
+  );
+
+  const toolbar = (
+    <DocumentExplorerToolbar
+      onCreateDocument={() => handleCreateDocument(null)}
+      onCreateFolder={() => handleCreateFolder(null)}
+    />
   );
 
   return (
-    <div className={styles.tree} style={style}>
-      <ExplorerTree<AgentDocumentItem>
-        canDrag={canDrag}
-        canDrop={canDrop}
-        canRename={canRename}
-        density="relaxed"
-        getContextMenuItems={getContextMenuItems}
-        nodes={nodes}
-        ref={treeRef}
-        style={{ height: '100%' }}
-        header={
-          <DocumentExplorerToolbar
-            onCreateDocument={() => handleCreateDocument(null)}
-            onCreateFolder={() => handleCreateFolder(null)}
-          />
-        }
-        onCommitRename={handleCommitRename}
-        onMove={handleMove}
-        onNodeClick={handleNodeClick}
-      />
+    <div className={styles.tree} ref={containerRef} style={treeStyle}>
+      {nodes.length === 0 ? (
+        // Keep the toolbar reachable (new folder / new doc) above the placeholder.
+        <Flexbox height={'100%'}>
+          {toolbar}
+          <Center flex={1} paddingBlock={24}>
+            <Empty description={t('workingPanel.resources.emptyDocuments')} icon={FileTextIcon} />
+          </Center>
+        </Flexbox>
+      ) : (
+        <ExplorerTree<AgentDocumentItem>
+          iconsColored
+          canDrag={canDrag}
+          canDrop={canDrop}
+          canRename={canRename}
+          getContextMenuItems={getContextMenuItems}
+          header={toolbar}
+          iconSet="complete"
+          itemHeight={DOCUMENT_TREE_LAYOUT.itemHeight}
+          nodes={nodes}
+          ref={treeRef}
+          style={{ height: '100%' }}
+          unsafeCSS={DOCUMENT_TREE_UNSAFE_CSS}
+          onCommitRename={handleCommitRename}
+          onMove={handleMove}
+          onNodeClick={handleNodeClick}
+        />
+      )}
     </div>
   );
 });

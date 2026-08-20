@@ -62,6 +62,13 @@ export const TEXT_READABLE_FILE_TYPES = [
   'groovy',
   'gradle',
 
+  // LaTeX & Academic
+  'tex',
+  'sty',
+  'cls',
+  'bib',
+  'bbl',
+
   // Other
   'log',
   'sql',
@@ -74,7 +81,7 @@ export const TEXT_READABLE_FILE_TYPES = [
  * Extensions that have dedicated parsers in `loadFile`. These are not text but
  * are explicitly supported file types that we know how to extract text from.
  */
-export const SPECIAL_PARSED_FILE_TYPES = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'pptx'];
+export const SPECIAL_PARSED_FILE_TYPES = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'pptx', 'ipynb'];
 
 /**
  * Determine if a file can be read as text based on its extension.

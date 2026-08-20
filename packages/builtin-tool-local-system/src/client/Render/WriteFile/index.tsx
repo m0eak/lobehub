@@ -6,18 +6,17 @@ import { ChevronRight } from 'lucide-react';
 import path from 'path-browserify-esm';
 import { memo } from 'react';
 
+import { InlineHtmlPreview, isHtmlFile } from '@/components/HtmlPreview';
 import { LocalFile, LocalFolder } from '@/features/LocalFile';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
   container: css`
-    padding: 8px;
-    border-radius: ${cssVar.borderRadiusLG};
-    background: ${cssVar.colorFillQuaternary};
+    padding-block: 4px;
   `,
   previewBox: css`
     overflow: hidden;
     border-radius: 8px;
-    background: ${cssVar.colorBgContainer};
+    background: ${cssVar.colorFillTertiary};
   `,
 }));
 
@@ -33,22 +32,29 @@ const buildNewFilePatch = (filePath: string, content: string) => {
     : `${header}${body}\n\\ No newline at end of file\n`;
 };
 
-const WriteFile = memo<BuiltinRenderProps<WriteLocalFileParams>>(({ args }) => {
+type WriteFileArgs = WriteLocalFileParams & {
+  file_path?: string;
+  filePath?: string;
+};
+
+const WriteFile = memo<BuiltinRenderProps<WriteFileArgs>>(({ args }) => {
   if (!args) return <Skeleton active />;
 
-  const { base, dir } = path.parse(args.path);
-  const ext = path.extname(args.path).slice(1).toLowerCase();
+  const filePath = args.path || args.filePath || args.file_path || '';
+  const { base, dir } = path.parse(filePath);
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  const isHtml = isHtmlFile({ path: filePath });
   const isMarkdown = ext === 'md' || ext === 'mdx';
 
   // Code-type files render as a "new file" unified diff so the visual is
   // consistent with EditLocalFile's PatchDiff. Markdown keeps its rendered
   // preview because a rendered doc reads better than an all-green diff.
-  if (!isMarkdown && args.content) {
+  if (!isMarkdown && !isHtml && args.content) {
     return (
       <PatchDiff
         fileName={base}
         language={ext || undefined}
-        patch={buildNewFilePatch(args.path, args.content)}
+        patch={buildNewFilePatch(filePath, args.content)}
         showHeader={false}
         variant={'borderless'}
         viewMode={'unified'}
@@ -61,14 +67,21 @@ const WriteFile = memo<BuiltinRenderProps<WriteLocalFileParams>>(({ args }) => {
       <Flexbox horizontal align={'center'}>
         <LocalFolder path={dir} />
         <Icon icon={ChevronRight} />
-        <LocalFile name={base} path={args.path} />
+        <LocalFile name={base} path={filePath} />
       </Flexbox>
 
       {args.content && (
-        <Flexbox className={styles.previewBox}>
-          <Markdown style={{ maxHeight: 240, overflow: 'auto', padding: '0 8px' }} variant={'chat'}>
-            {args.content}
-          </Markdown>
+        <Flexbox className={styles.previewBox} style={{ height: isHtml ? 260 : undefined }}>
+          {isHtml ? (
+            <InlineHtmlPreview content={args.content} />
+          ) : (
+            <Markdown
+              style={{ maxHeight: 240, overflow: 'auto', padding: '0 8px' }}
+              variant={'chat'}
+            >
+              {args.content}
+            </Markdown>
+          )}
         </Flexbox>
       )}
     </Flexbox>

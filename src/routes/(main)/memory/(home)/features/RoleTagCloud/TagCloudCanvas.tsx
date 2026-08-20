@@ -267,12 +267,12 @@ const ConnectionLine = memo<ConnectionLineProps>(
   },
 );
 
-// Center avatar component
-const CenterAvatar = memo(() => {
+const CenterAvatar = () => {
   return (
     <Html
       center
       position={[0, 0, 0]}
+      zIndexRange={[10, 0]}
       style={{
         pointerEvents: 'none',
       }}
@@ -280,7 +280,7 @@ const CenterAvatar = memo(() => {
       <UserAvatar shape={'circle'} size={80} />
     </Html>
   );
-});
+};
 
 interface CloudProps {
   radius?: number;

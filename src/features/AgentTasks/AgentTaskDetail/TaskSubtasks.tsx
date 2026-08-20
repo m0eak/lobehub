@@ -1,14 +1,17 @@
 import type { TaskDetailSubtask } from '@lobechat/types';
-import { ActionIcon, Block, Flexbox, Icon, showContextMenu, Text } from '@lobehub/ui';
-import { App, Button, ConfigProvider, Tree } from 'antd';
+import { ActionIcon, Block, Flexbox, Icon, Text } from '@lobehub/ui';
+import { confirmModal, toast } from '@lobehub/ui/base-ui';
+import { ConfigProvider, Tree } from 'antd';
 import type { DataNode } from 'antd/es/tree';
 import { cssVar } from 'antd-style';
 import { ChevronDown, ListTodoIcon, PlayCircle, Plus } from 'lucide-react';
 import type { Key, MouseEvent } from 'react';
 import { memo, useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 
+import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
+import { usePermission } from '@/hooks/usePermission';
+import { showContextMenu } from '@/libs/contextMenu';
 import { taskService } from '@/services/task';
 import { useTaskStore } from '@/store/task';
 import { taskDetailSelectors } from '@/store/task/selectors';
@@ -23,7 +26,9 @@ import TaskTriggerTag from '../features/TaskTriggerTag';
 import { useTaskContextMenuActions } from '../features/useTaskItemContextMenu';
 import AccordionArrowIcon from '../shared/AccordionArrowIcon';
 import { styles } from '../shared/style';
+import { taskDetailPath } from '../shared/taskDetailPath';
 import RunSubtasksPreview from './RunSubtasksPreview';
+import TopicStatusIcon from './TopicStatusIcon';
 
 type TaskStatus = 'backlog' | 'canceled' | 'completed' | 'failed' | 'paused' | 'running';
 
@@ -53,6 +58,7 @@ const buildTree = (subtasks: TaskDetailSubtask[]): TaskTreeNode[] =>
 const SubtaskTitle = memo<{ task: TaskDetailSubtask }>(({ task }) => {
   const status = toTaskStatus(task.status);
   const isRunning = status === 'running';
+  const hasRunningTopic = Boolean(task.runningTopic);
   const hasName = !!task.name;
 
   return (
@@ -73,7 +79,9 @@ const SubtaskTitle = memo<{ task: TaskDetailSubtask }>(({ task }) => {
         style={{ alignItems: 'center', display: 'inline-flex', flex: 'none' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <TaskStatusTag size={14} status={status} taskIdentifier={task.identifier} />
+        <TaskStatusTag size={14} status={status} taskIdentifier={task.identifier}>
+          {hasRunningTopic ? <TopicStatusIcon size={14} status="running" /> : undefined}
+        </TaskStatusTag>
       </span>
       {hasName && (
         <Text fontSize={13} style={{ flex: 'none' }} type={'secondary'}>
@@ -126,8 +134,9 @@ const toTreeData = (tree: TaskTreeNode[]): DataNode[] => {
 
 const TaskSubtasks = memo(() => {
   const { t } = useTranslation('chat');
-  const { message, modal } = App.useApp();
-  const navigate = useNavigate();
+
+  const navigate = useWorkspaceAwareNavigate();
+  const { allowed: canEditTask, reason } = usePermission('create_content');
   const agentId = useTaskStore(taskDetailSelectors.activeTaskAgentId);
   const subtasks = useTaskStore(taskDetailSelectors.activeTaskSubtasks);
   const taskId = useTaskStore(taskDetailSelectors.activeTaskId);
@@ -138,13 +147,6 @@ const TaskSubtasks = memo(() => {
   const [isCreating, setIsCreating] = useState(false);
   const [isExpanded, setIsExpanded] = useState(true);
   const [isPlanning, setIsPlanning] = useState(false);
-
-  const handleNavigate = useCallback(
-    (identifier: string) => {
-      navigate(`/task/${identifier}`);
-    },
-    [navigate],
-  );
 
   const subtaskMap = useMemo(() => {
     const map = new Map<string, TaskDetailSubtask>();
@@ -158,6 +160,14 @@ const TaskSubtasks = memo(() => {
     return map;
   }, [subtasks]);
 
+  const handleNavigate = useCallback(
+    (identifier: string) => {
+      const subtask = subtaskMap.get(identifier);
+      navigate(taskDetailPath(identifier, subtask?.assignee?.id ?? undefined));
+    },
+    [navigate, subtaskMap],
+  );
+
   const treeData = useMemo(() => {
     if (subtasks.length === 0) return [];
     return toTreeData(buildTree(subtasks));
@@ -165,28 +175,35 @@ const TaskSubtasks = memo(() => {
 
   const handleRightClick = useCallback(
     ({ event, node }: { event: MouseEvent; node: { key: Key } }) => {
+      if (!canEditTask) return;
       const subtask = subtaskMap.get(String(node.key));
       if (!subtask) return;
       event.preventDefault();
       showContextMenu(
         buildItems({
+          assigneeAgentId: subtask.assignee?.id,
           identifier: subtask.identifier,
           priority: subtask.priority,
           status: subtask.status,
         }),
       );
       installKeyboardHandlers({
+        assigneeAgentId: subtask.assignee?.id,
         identifier: subtask.identifier,
         priority: subtask.priority,
         status: subtask.status,
       });
     },
-    [subtaskMap, buildItems, installKeyboardHandlers],
+    [canEditTask, subtaskMap, buildItems, installKeyboardHandlers],
   );
 
-  const toggleCreating = useCallback(() => setIsCreating((prev) => !prev), []);
+  const toggleCreating = useCallback(() => {
+    if (!canEditTask) return;
+    setIsCreating((prev) => !prev);
+  }, [canEditTask]);
 
   const handleRunAll = useCallback(async () => {
+    if (!canEditTask) return;
     if (!taskId || isPlanning) return;
     setIsPlanning(true);
     try {
@@ -201,14 +218,13 @@ const TaskSubtasks = memo(() => {
         plan.blockedByCycle.length > 0 ||
         plan.cycles.length > 0;
       if (plan.totalRunnable === 0 && !hasInformativeState) {
-        message.info(t('taskDetail.runAll.empty'));
+        toast.info(t('taskDetail.runAll.empty'));
         return;
       }
 
       const canRun = plan.totalRunnable > 0;
-      modal.confirm({
+      confirmModal({
         cancelText: t('taskDetail.runAll.cancel'),
-        centered: true,
         content: <RunSubtasksPreview plan={plan} />,
         okButtonProps: canRun ? undefined : { disabled: true },
         okText: t('taskDetail.runAll.confirm', { count: plan.totalRunnable }),
@@ -218,7 +234,7 @@ const TaskSubtasks = memo(() => {
           const kicked = res.data.kickedOff.length;
           const failed = res.data.failed?.length ?? 0;
           if (failed > 0) {
-            message.warning(
+            toast.warning(
               t('taskDetail.runAll.partialFailure', {
                 failed,
                 ok: kicked,
@@ -226,19 +242,18 @@ const TaskSubtasks = memo(() => {
               }),
             );
           } else {
-            message.success(t('taskDetail.runAll.kickedOff', { count: kicked }));
+            toast.success(t('taskDetail.runAll.kickedOff', { count: kicked }));
           }
         },
         title: t('taskDetail.runAll.title'),
-        width: 520,
       });
     } catch (error) {
       console.error('[TaskSubtasks] Failed to plan subtasks:', error);
-      message.error(t('taskDetail.updateFailed'));
+      toast.error(t('taskDetail.updateFailed'));
     } finally {
       setIsPlanning(false);
     }
-  }, [taskId, isPlanning, message, modal, t, runReadySubtasks]);
+  }, [canEditTask, taskId, isPlanning, t, runReadySubtasks]);
 
   if (!taskId) return null;
 
@@ -278,17 +293,18 @@ const TaskSubtasks = memo(() => {
             </Flexbox>
             <Flexbox horizontal align="center" gap={4}>
               <ActionIcon
-                disabled={isPlanning}
+                disabled={!canEditTask || isPlanning}
                 icon={PlayCircle}
                 loading={isPlanning}
                 size="small"
-                title={t('taskDetail.runAll')}
+                title={canEditTask ? t('taskDetail.runAll') : reason}
                 onClick={handleRunAll}
               />
               <ActionIcon
+                disabled={!canEditTask}
                 icon={Plus}
                 size="small"
-                title={t('taskDetail.addSubtask')}
+                title={canEditTask ? t('taskDetail.addSubtask') : reason}
                 onClick={toggleCreating}
               />
             </Flexbox>
@@ -326,18 +342,23 @@ const TaskSubtasks = memo(() => {
         </>
       ) : (
         <>
-          <Flexbox horizontal align="flex-start">
-            <Button
-              className={styles.addSubtaskButton}
-              icon={<Icon icon={Plus} size={14} />}
-              shape="round"
-              size="small"
-              type="text"
-              onClick={toggleCreating}
-            >
+          <Block
+            clickable
+            horizontal
+            align="center"
+            gap={8}
+            paddingBlock={4}
+            paddingInline={8}
+            style={{ width: 'fit-content' }}
+            title={canEditTask ? undefined : reason}
+            variant="borderless"
+            onClick={toggleCreating}
+          >
+            <Icon color={cssVar.colorTextDescription} icon={Plus} size={16} />
+            <Text color={cssVar.colorTextSecondary} fontSize={13} weight={500}>
               {t('taskDetail.addSubtask')}
-            </Button>
-          </Flexbox>
+            </Text>
+          </Block>
           {isCreating && (
             <CreateTaskInlineEntry
               autoFocus
